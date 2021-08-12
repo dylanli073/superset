@@ -18,6 +18,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, List, Optional
 
+from sqlalchemy.sql.sqltypes import String
+
 from flask_appbuilder.security.sqla.models import User
 from sqlalchemy.orm import Session
 
@@ -60,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 
 class BaseReportState:
-    current_states: List[ReportState] = []
+    current_states: List[String] = []
     initial: bool = False
 
     def __init__(
@@ -243,7 +245,7 @@ class ReportNotTriggeredErrorState(BaseReportState):
     - Error
     """
 
-    current_states = [ReportState.NOOP, ReportState.ERROR]
+    current_states = ['ReportState.NOOP', 'ReportState.ERROR']
     initial = True
 
     def next(self) -> None:
@@ -269,7 +271,7 @@ class ReportWorkingState(BaseReportState):
     - Working
     """
 
-    current_states = [ReportState.WORKING]
+    current_states = ['ReportState.WORKING']
 
     def next(self) -> None:
         if self.is_on_working_timeout():
@@ -294,7 +296,7 @@ class ReportSuccessState(BaseReportState):
     - Success
     """
 
-    current_states = [ReportState.SUCCESS, ReportState.GRACE]
+    current_states = ['ReportState.SUCCESS', 'ReportState.GRACE']
 
     def next(self) -> None:
         self.set_state_and_log(ReportState.WORKING)
