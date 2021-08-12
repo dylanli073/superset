@@ -337,6 +337,10 @@ class ReportScheduleStateMachine:  # pylint: disable=too-few-public-methods
     def run(self) -> None:
         state_found = False
         for state_cls in self.states_cls:
+            print("======================================")
+            print("self._report_schedule.last_state:", self._report_schedule.last_state)
+            print("state_cls.current_states", state_cls.current_states)
+            print("======================================")
             if (self._report_schedule.last_state is None and state_cls.initial) or (
                 self._report_schedule.last_state in state_cls.current_states
             ):
