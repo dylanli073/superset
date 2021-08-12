@@ -19,12 +19,13 @@
 import React from 'react';
 import Button from 'src/components/Button';
 import { Select } from 'src/components';
-import { css, styled, t } from '@superset-ui/core';
+import { css, styled, t, makeApi } from '@superset-ui/core';
 import { FormLabel } from 'src/components/Form';
 
 import VizTypeGallery, {
   MAX_ADVISABLE_VIZ_GALLERY_WIDTH,
 } from 'src/explore/components/controls/VizTypeControl/VizTypeGallery';
+import { number } from 'mathjs';
 
 interface Datasource {
   label: string;
@@ -40,6 +41,7 @@ export type AddSliceContainerState = {
   datasourceType?: string;
   datasourceValue?: string;
   visType: string | null;
+  datasets: [];
 };
 
 const ESTIMATED_NAV_HEIGHT = '56px';
@@ -105,11 +107,17 @@ export default class AddSliceContainer extends React.PureComponent<
     super(props);
     this.state = {
       visType: null,
+      datasets: [],
     };
 
     this.changeDatasource = this.changeDatasource.bind(this);
     this.changeVisType = this.changeVisType.bind(this);
     this.gotoSlice = this.gotoSlice.bind(this);
+    this.getDatasets = this.getDatasets.bind(this);
+  }
+
+  componentDidMount() {
+    this.getDatasets();
   }
 
   exploreUrl() {
@@ -128,8 +136,8 @@ export default class AddSliceContainer extends React.PureComponent<
 
   changeDatasource(value: string) {
     this.setState({
-      datasourceValue: value,
-      datasourceId: value.split('__')[0],
+      datasourceValue: `${value}__table`, // legacy formatting for datasourceIds
+      datasourceId: value,
     });
   }
 
@@ -141,7 +149,44 @@ export default class AddSliceContainer extends React.PureComponent<
     return !(this.state.datasourceId && this.state.visType);
   }
 
+  async getDatasets() {
+    console.log('getting datasets');
+
+    // const queryParams = rison.encode({
+    //   filters: [
+    //     {
+    //       col: 'table_name',
+    //       opr: 'ct',
+    //       value: searchText,
+    //     },
+    //     {
+    //       col: 'owners',
+    //       opr: 'rel_m_m',
+    //       value: userId,
+    //     },
+    //   ],
+    //   order_column: 'changed_on_delta_humanized',
+    //   order_direction: 'desc',
+    // });
+    const queryParams = '';
+
+    const response = await makeApi({
+      method: 'GET',
+      endpoint: '/api/v1/dataset',
+    })(`q=${queryParams}`);
+
+    this.setState({ datasets: response.result });
+  }
+
   render() {
+    const { datasets } = this.state;
+    const optionDatasets = datasets.map(
+      (dataset: { id: number; table_name: string }) => ({
+        value: dataset.id,
+        label: dataset.table_name,
+      }),
+    );
+
     return (
       <StyledContainer>
         <h3 css={cssStatic}>{t('Create a new chart')}</h3>
@@ -152,7 +197,7 @@ export default class AddSliceContainer extends React.PureComponent<
             name="select-datasource"
             header={<FormLabel required>{t('Choose a dataset')}</FormLabel>}
             onChange={this.changeDatasource}
-            options={this.props.datasources}
+            options={optionDatasets}
             placeholder={t('Choose a dataset')}
             showSearch
             value={this.state.datasourceValue}
