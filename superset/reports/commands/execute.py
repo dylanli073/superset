@@ -14,27 +14,18 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-import json
 import logging
 from datetime import datetime, timedelta
-from io import BytesIO
 from typing import Any, List, Optional
-from uuid import UUID
 
-import pandas as pd
-from celery.exceptions import SoftTimeLimitExceeded
 from flask_appbuilder.security.sqla.models import User
 from sqlalchemy.orm import Session
 
-from superset import app
+from superset import app, thumbnail_cache
 from superset.commands.base import BaseCommand
 from superset.commands.exceptions import CommandException
-from superset.extensions import feature_flag_manager, machine_auth_provider_factory
 from superset.models.reports import (
-    ReportDataFormat,
     ReportExecutionLog,
-    ReportRecipients,
-    ReportRecipientType,
     ReportSchedule,
     ReportScheduleType,
     ReportState,
@@ -43,29 +34,21 @@ from superset.reports.commands.alert import AlertCommand
 from superset.reports.commands.exceptions import (
     ReportScheduleAlertEndGracePeriodError,
     ReportScheduleAlertGracePeriodError,
-    ReportScheduleCsvFailedError,
-    ReportScheduleCsvTimeout,
     ReportScheduleExecuteUnexpectedError,
     ReportScheduleNotFoundError,
     ReportScheduleNotificationError,
     ReportSchedulePreviousWorkingError,
     ReportScheduleScreenshotFailedError,
-    ReportScheduleScreenshotTimeout,
     ReportScheduleSelleniumUserNotFoundError,
     ReportScheduleStateNotFoundError,
     ReportScheduleUnexpectedError,
     ReportScheduleWorkingTimeoutError,
 )
-from superset.reports.dao import (
-    REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER,
-    ReportScheduleDAO,
-)
+from superset.reports.dao import ReportScheduleDAO
 from superset.reports.notifications import create_notification
-from superset.reports.notifications.base import NotificationContent
+from superset.reports.notifications.base import NotificationContent, ScreenshotData
 from superset.reports.notifications.exceptions import NotificationError
 from superset.utils.celery import session_scope
-from superset.utils.core import ChartDataResultFormat, ChartDataResultType
-from superset.utils.csv import get_chart_csv_data
 from superset.utils.screenshots import (
     BaseScreenshot,
     ChartScreenshot,
@@ -85,13 +68,11 @@ class BaseReportState:
         session: Session,
         report_schedule: ReportSchedule,
         scheduled_dttm: datetime,
-        execution_id: UUID,
     ) -> None:
         self._session = session
         self._report_schedule = report_schedule
         self._scheduled_dttm = scheduled_dttm
         self._start_dttm = datetime.utcnow()
-        self._execution_id = execution_id
 
     def set_state_and_log(
         self, state: ReportState, error_message: Optional[str] = None,
@@ -100,6 +81,7 @@ class BaseReportState:
         Updates current ReportSchedule state and TS. If on final state writes the log
         for this execution
         """
+        print("DL7: ==== in set_state_and_log")
         now_dttm = datetime.utcnow()
         self.set_state(state, now_dttm)
         self.create_log(
@@ -131,25 +113,15 @@ class BaseReportState:
             state=state,
             error_message=error_message,
             report_schedule=self._report_schedule,
-            uuid=self._execution_id,
         )
         self._session.add(log)
         self._session.commit()
 
-    def _get_url(
-        self, user_friendly: bool = False, csv: bool = False, **kwargs: Any
-    ) -> str:
+    def _get_url(self, user_friendly: bool = False, **kwargs: Any) -> str:
         """
         Get the url for this report schedule: chart or dashboard
         """
         if self._report_schedule.chart:
-            if csv:
-                return get_url_path(
-                    "ChartRestApi.get_data",
-                    pk=self._report_schedule.chart_id,
-                    format=ChartDataResultFormat.CSV.value,
-                    type=ChartDataResultType.POST_PROCESSED.value,
-                )
             return get_url_path(
                 "Superset.slice",
                 user_friendly=user_friendly,
@@ -163,7 +135,7 @@ class BaseReportState:
             **kwargs,
         )
 
-    def _get_user(self) -> User:
+    def _get_screenshot_user(self) -> User:
         user = (
             self._session.query(User)
             .filter(User.username == app.config["THUMBNAIL_SELENIUM_USER"])
@@ -173,122 +145,35 @@ class BaseReportState:
             raise ReportScheduleSelleniumUserNotFoundError()
         return user
 
-    def _get_screenshot(self) -> bytes:
+    def _get_screenshot(self) -> ScreenshotData:
         """
         Get a chart or dashboard screenshot
-
         :raises: ReportScheduleScreenshotFailedError
         """
         screenshot: Optional[BaseScreenshot] = None
         if self._report_schedule.chart:
             url = self._get_url(standalone="true")
-            screenshot = ChartScreenshot(
-                url,
-                self._report_schedule.chart.digest,
-                window_size=app.config["WEBDRIVER_WINDOW"]["slice"],
-                thumb_size=app.config["WEBDRIVER_WINDOW"]["slice"],
-            )
+            screenshot = ChartScreenshot(url, self._report_schedule.chart.digest)
         else:
             url = self._get_url()
             screenshot = DashboardScreenshot(
-                url,
-                self._report_schedule.dashboard.digest,
-                window_size=app.config["WEBDRIVER_WINDOW"]["dashboard"],
-                thumb_size=app.config["WEBDRIVER_WINDOW"]["dashboard"],
+                url, self._report_schedule.dashboard.digest
             )
-        user = self._get_user()
-        try:
-            image_data = screenshot.get_screenshot(user=user)
-        except SoftTimeLimitExceeded:
-            logger.warning("A timeout occurred while taking a screenshot.")
-            raise ReportScheduleScreenshotTimeout()
-        except Exception as ex:
-            raise ReportScheduleScreenshotFailedError(
-                f"Failed taking a screenshot {str(ex)}"
-            )
+        image_url = self._get_url(user_friendly=True)
+        user = self._get_screenshot_user()
+        image_data = screenshot.compute_and_cache(
+            user=user, cache=thumbnail_cache, force=True,
+        )
         if not image_data:
             raise ReportScheduleScreenshotFailedError()
-        return image_data
-
-    def _get_csv_data(self) -> bytes:
-        url = self._get_url(csv=True)
-        auth_cookies = machine_auth_provider_factory.instance.get_auth_cookies(
-            self._get_user()
-        )
-
-        # To load CSV data from the endpoint the chart must have been saved
-        # with its query context. For charts without saved query context we
-        # get a screenshot to force the chart to produce and save the query
-        # context.
-        if self._report_schedule.chart.query_context is None:
-            logger.warning("No query context found, taking a screenshot to generate it")
-            try:
-                self._get_screenshot()
-            except (
-                ReportScheduleScreenshotFailedError,
-                ReportScheduleScreenshotTimeout,
-            ) as ex:
-                raise ReportScheduleCsvFailedError(
-                    "Unable to fetch CSV data because the chart has no query context "
-                    "saved, and an error occurred when fetching it via a screenshot. "
-                    "Please try loading the chart and saving it again."
-                ) from ex
-
-        try:
-            csv_data = get_chart_csv_data(url, auth_cookies)
-        except SoftTimeLimitExceeded:
-            raise ReportScheduleCsvTimeout()
-        except Exception as ex:
-            raise ReportScheduleCsvFailedError(f"Failed generating csv {str(ex)}")
-        if not csv_data:
-            raise ReportScheduleCsvFailedError()
-        return csv_data
-
-    def _get_embedded_data(self) -> pd.DataFrame:
-        """
-        Return data as an HTML table, to embed in the email.
-        """
-        buf = BytesIO(self._get_csv_data())
-        df = pd.read_csv(buf)
-        return df
+        return ScreenshotData(url=image_url, image=image_data)
 
     def _get_notification_content(self) -> NotificationContent:
         """
         Gets a notification content, this is composed by a title and a screenshot
-
         :raises: ReportScheduleScreenshotFailedError
         """
-        csv_data = None
-        embedded_data = None
-        error_text = None
-        screenshot_data = None
-        url = self._get_url(user_friendly=True)
-        if (
-            feature_flag_manager.is_feature_enabled("ALERTS_ATTACH_REPORTS")
-            or self._report_schedule.type == ReportScheduleType.REPORT
-        ):
-            if self._report_schedule.report_format == ReportDataFormat.VISUALIZATION:
-                screenshot_data = self._get_screenshot()
-                if not screenshot_data:
-                    error_text = "Unexpected missing screenshot"
-            elif (
-                self._report_schedule.chart
-                and self._report_schedule.report_format == ReportDataFormat.DATA
-            ):
-                csv_data = self._get_csv_data()
-                if not csv_data:
-                    error_text = "Unexpected missing csv file"
-            if error_text:
-                return NotificationContent(
-                    name=self._report_schedule.name, text=error_text
-                )
-
-        if (
-            self._report_schedule.chart
-            and self._report_schedule.report_format == ReportDataFormat.TEXT
-        ):
-            embedded_data = self._get_embedded_data()
-
+        screenshot_data = self._get_screenshot()
         if self._report_schedule.chart:
             name = (
                 f"{self._report_schedule.name}: "
@@ -299,70 +184,24 @@ class BaseReportState:
                 f"{self._report_schedule.name}: "
                 f"{self._report_schedule.dashboard.dashboard_title}"
             )
-        return NotificationContent(
-            name=name,
-            url=url,
-            screenshot=screenshot_data,
-            description=self._report_schedule.description,
-            csv=csv_data,
-            embedded_data=embedded_data,
-        )
+        return NotificationContent(name=name, screenshot=screenshot_data)
 
-    def _send(
-        self,
-        notification_content: NotificationContent,
-        recipients: List[ReportRecipients],
-    ) -> None:
+    def send(self) -> None:
         """
-        Sends a notification to all recipients
-
+        Creates the notification content and sends them to all recipients
         :raises: ReportScheduleNotificationError
         """
         notification_errors = []
-        for recipient in recipients:
+        notification_content = self._get_notification_content()
+        for recipient in self._report_schedule.recipients:
             notification = create_notification(recipient, notification_content)
             try:
-                if app.config["ALERT_REPORTS_NOTIFICATION_DRY_RUN"]:
-                    logger.info(
-                        "Would send notification for alert %s, to %s",
-                        self._report_schedule.name,
-                        recipient.recipient_config_json,
-                    )
-                else:
-                    notification.send()
+                notification.send()
             except NotificationError as ex:
                 # collect notification errors but keep processing them
                 notification_errors.append(str(ex))
         if notification_errors:
             raise ReportScheduleNotificationError(";".join(notification_errors))
-
-    def send(self) -> None:
-        """
-        Creates the notification content and sends them to all recipients
-
-        :raises: ReportScheduleNotificationError
-        """
-        notification_content = self._get_notification_content()
-        self._send(notification_content, self._report_schedule.recipients)
-
-    def send_error(self, name: str, message: str) -> None:
-        """
-        Creates and sends a notification for an error, to all recipients
-
-        :raises: ReportScheduleNotificationError
-        """
-        notification_content = NotificationContent(name=name, text=message)
-
-        # filter recipients to recipients who are also owners
-        owner_recipients = [
-            ReportRecipients(
-                type=ReportRecipientType.EMAIL,
-                recipient_config_json=json.dumps({"target": owner.email}),
-            )
-            for owner in self._report_schedule.owners
-        ]
-
-        self._send(notification_content, owner_recipients)
 
     def is_in_grace_period(self) -> bool:
         """
@@ -379,38 +218,16 @@ class BaseReportState:
             < last_success.end_dttm
         )
 
-    def is_in_error_grace_period(self) -> bool:
-        """
-        Checks if an alert/report on error is on it's notification grace period
-        """
-        last_success = ReportScheduleDAO.find_last_error_notification(
-            self._report_schedule, session=self._session
-        )
-        if not last_success:
-            return False
-        return (
-            last_success is not None
-            and self._report_schedule.grace_period
-            and datetime.utcnow()
-            - timedelta(seconds=self._report_schedule.grace_period)
-            < last_success.end_dttm
-        )
-
     def is_on_working_timeout(self) -> bool:
         """
         Checks if an alert is on a working timeout
         """
-        last_working = ReportScheduleDAO.find_last_entered_working_log(
-            self._report_schedule, session=self._session
-        )
-        if not last_working:
-            return False
         return (
             self._report_schedule.working_timeout is not None
             and self._report_schedule.last_eval_dttm is not None
             and datetime.utcnow()
             - timedelta(seconds=self._report_schedule.working_timeout)
-            > last_working.end_dttm
+            > self._report_schedule.last_eval_dttm
         )
 
     def next(self) -> None:
@@ -431,35 +248,19 @@ class ReportNotTriggeredErrorState(BaseReportState):
 
     def next(self) -> None:
         self.set_state_and_log(ReportState.WORKING)
+        print("DL2: =============== Email working")
         try:
             # If it's an alert check if the alert is triggered
             if self._report_schedule.type == ReportScheduleType.ALERT:
                 if not AlertCommand(self._report_schedule).run():
-                    print("DL4: =============== No-op triggered")
                     self.set_state_and_log(ReportState.NOOP)
                     return
             self.send()
-            print("DL5: =============== Triggering email send")
+            print("DL3: =============== Email sent")
             self.set_state_and_log(ReportState.SUCCESS)
-        except CommandException as first_ex:
-            self.set_state_and_log(ReportState.ERROR, error_message=str(first_ex))
-            # TODO (dpgaspar) convert this logic to a new state eg: ERROR_ON_GRACE
-            if not self.is_in_error_grace_period():
-                try:
-                    self.send_error(
-                        f"Error occurred for {self._report_schedule.type}:"
-                        f" {self._report_schedule.name}",
-                        str(first_ex),
-                    )
-                    self.set_state_and_log(
-                        ReportState.ERROR,
-                        error_message=REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER,
-                    )
-                except CommandException as second_ex:
-                    self.set_state_and_log(
-                        ReportState.ERROR, error_message=str(second_ex)
-                    )
-            raise first_ex
+        except CommandException as ex:
+            self.set_state_and_log(ReportState.ERROR, error_message=str(ex))
+            raise ex
 
 
 class ReportWorkingState(BaseReportState):
@@ -480,6 +281,7 @@ class ReportWorkingState(BaseReportState):
             )
             raise exception_timeout
         exception_working = ReportSchedulePreviousWorkingError()
+        print("DL4: =============== Working right now")
         self.set_state_and_log(
             ReportState.WORKING, error_message=str(exception_working),
         )
@@ -500,20 +302,20 @@ class ReportSuccessState(BaseReportState):
     def next(self) -> None:
         self.set_state_and_log(ReportState.WORKING)
         if self._report_schedule.type == ReportScheduleType.ALERT:
-            print("DL2: ======================================")
             if self.is_in_grace_period():
                 self.set_state_and_log(
                     ReportState.GRACE,
                     error_message=str(ReportScheduleAlertGracePeriodError()),
                 )
                 return
+            print("DL5: =============== No-op triggered")
             self.set_state_and_log(
                 ReportState.NOOP,
                 error_message=str(ReportScheduleAlertEndGracePeriodError()),
             )
             return
         try:
-            print("DL3: ======================================")
+            print("DL6: =============== Email sent")
             self.send()
             self.set_state_and_log(ReportState.SUCCESS)
         except CommandException as ex:
@@ -530,32 +332,25 @@ class ReportScheduleStateMachine:  # pylint: disable=too-few-public-methods
     def __init__(
         self,
         session: Session,
-        task_uuid: UUID,
         report_schedule: ReportSchedule,
         scheduled_dttm: datetime,
     ):
         self._session = session
-        self._execution_id = task_uuid
         self._report_schedule = report_schedule
         self._scheduled_dttm = scheduled_dttm
 
     def run(self) -> None:
         state_found = False
-
         for state_cls in self.states_cls:
             print("DL1: ======================================")
             print("self._report_schedule.last_state:", self._report_schedule.last_state)
             print("state_cls.current_states", state_cls.current_states)
             print("======================================")
-
             if (self._report_schedule.last_state is None and state_cls.initial) or (
                 self._report_schedule.last_state in state_cls.current_states
             ):
-                state_cls(  # pylint: disable=not-callable
-                    self._session,
-                    self._report_schedule,
-                    self._scheduled_dttm,
-                    self._execution_id,
+                state_cls(
+                    self._session, self._report_schedule, self._scheduled_dttm
                 ).next()
                 state_found = True
                 break
@@ -570,11 +365,10 @@ class AsyncExecuteReportScheduleCommand(BaseCommand):
     - On Alerts uses related Command AlertCommand and sends configured notifications
     """
 
-    def __init__(self, task_id: str, model_id: int, scheduled_dttm: datetime):
+    def __init__(self, model_id: int, scheduled_dttm: datetime):
         self._model_id = model_id
         self._model: Optional[ReportSchedule] = None
         self._scheduled_dttm = scheduled_dttm
-        self._execution_id = UUID(task_id)
 
     def run(self) -> None:
         with session_scope(nullpool=True) as session:
@@ -583,7 +377,7 @@ class AsyncExecuteReportScheduleCommand(BaseCommand):
                 if not self._model:
                     raise ReportScheduleExecuteUnexpectedError()
                 ReportScheduleStateMachine(
-                    session, self._execution_id, self._model, self._scheduled_dttm
+                    session, self._model, self._scheduled_dttm
                 ).run()
             except CommandException as ex:
                 raise ex
