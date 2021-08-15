@@ -374,6 +374,9 @@ class AsyncExecuteReportScheduleCommand(BaseCommand):
         with session_scope(nullpool=True) as session:
             try:
                 self.validate(session=session)
+                print("=====================")
+                print("DLPP: in run() calling ReportSchedule, self_model: ", self._model)
+                print("=====================")
                 if not self._model:
                     raise ReportScheduleExecuteUnexpectedError()
                 ReportScheduleStateMachine(
@@ -388,6 +391,7 @@ class AsyncExecuteReportScheduleCommand(BaseCommand):
         self, session: Session = None
     ) -> None:
         # Validate/populate model exists
+        print("DLPP: model id: in validate section: ", self._model_id)
         self._model = ReportScheduleDAO.find_by_id(self._model_id, session=session)
         if not self._model:
             raise ReportScheduleNotFoundError()
