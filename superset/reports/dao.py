@@ -103,6 +103,7 @@ class ReportScheduleDAO(BaseDAO):
             for report_schedule in report_schedules:
                 db.session.delete(report_schedule)
             if commit:
+                print("Committing in wrong location A")
                 db.session.commit()
         except SQLAlchemyError as ex:
             if commit:
@@ -154,6 +155,7 @@ class ReportScheduleDAO(BaseDAO):
                 )
             db.session.add(model)
             if commit:
+                print("Committing in wrong location B")
                 db.session.commit()
             return model
         except SQLAlchemyError as ex:
@@ -188,6 +190,7 @@ class ReportScheduleDAO(BaseDAO):
                 ]
             db.session.merge(model)
             if commit:
+                print("Committing in wrong location C")
                 db.session.commit()
             return model
         except SQLAlchemyError as ex:
@@ -241,6 +244,7 @@ class ReportScheduleDAO(BaseDAO):
                 .delete(synchronize_session="fetch")
             )
             if commit:
+                print("Committing in wrong location D")
                 session.commit()
             return row_count
         except SQLAlchemyError as ex:
