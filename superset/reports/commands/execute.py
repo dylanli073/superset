@@ -96,6 +96,7 @@ class BaseReportState:
         self._report_schedule.last_state = state
         self._report_schedule.last_eval_dttm = dttm
         self._session.merge(self._report_schedule)
+        print("DL8: in set_state ==============")
         self._session.commit()
 
     def create_log(  # pylint: disable=too-many-arguments
@@ -115,6 +116,7 @@ class BaseReportState:
             report_schedule=self._report_schedule,
         )
         self._session.add(log)
+        print("DL8: in create_log ==============")
         self._session.commit()
 
     def _get_url(self, user_friendly: bool = False, **kwargs: Any) -> str:
