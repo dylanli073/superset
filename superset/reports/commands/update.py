@@ -52,6 +52,7 @@ class UpdateReportScheduleCommand(BaseReportScheduleCommand):
     def run(self) -> Model:
         self.validate()
         try:
+            print("In UpdateReportScheduleCommand, updating self._model")
             report_schedule = ReportScheduleDAO.update(self._model, self._properties)
         except DAOUpdateFailedError as ex:
             logger.exception(ex.exception)
@@ -78,6 +79,7 @@ class UpdateReportScheduleCommand(BaseReportScheduleCommand):
             and "active" in self._properties
             and not self._properties["active"]
         ):
+            print("ReportState.NOOP, in update.py")
             self._properties["last_state"] = ReportState.NOOP
 
         # validate relation by report type
