@@ -93,10 +93,10 @@ class BaseReportState:
         Set the current report schedule state, on this case we want to
         commit immediately
         """
+        print("DL8: in set_state ==============")
         self._report_schedule.last_state = state
         self._report_schedule.last_eval_dttm = dttm
         self._session.merge(self._report_schedule)
-        print("DL8: in set_state ==============")
         self._session.commit()
 
     def create_log(  # pylint: disable=too-many-arguments
@@ -105,6 +105,7 @@ class BaseReportState:
         """
         Creates a Report execution log, uses the current computed last_value for Alerts
         """
+        print("DL9: in create_log ==============")
         log = ReportExecutionLog(
             scheduled_dttm=self._scheduled_dttm,
             start_dttm=self._start_dttm,
@@ -116,7 +117,6 @@ class BaseReportState:
             report_schedule=self._report_schedule,
         )
         self._session.add(log)
-        print("DL8: in create_log ==============")
         self._session.commit()
 
     def _get_url(self, user_friendly: bool = False, **kwargs: Any) -> str:
@@ -345,8 +345,8 @@ class ReportScheduleStateMachine:  # pylint: disable=too-few-public-methods
         state_found = False
         for state_cls in self.states_cls:
             print("DL1: ======================================")
-            print("self._report_schedule.last_state:", self._report_schedule.last_state)
-            print("state_cls.current_states", state_cls.current_states)
+            print("self._report_schedule.last_state: test", self._report_schedule.last_state)
+            print("state_cls.current_states: test", state_cls.current_states)
             print("======================================")
             if (self._report_schedule.last_state is None and state_cls.initial) or (
                 self._report_schedule.last_state in state_cls.current_states
