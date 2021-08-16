@@ -249,6 +249,7 @@ class ReportNotTriggeredErrorState(BaseReportState):
     initial = True
 
     def next(self) -> None:
+        print("========In ReportNotTriggeredState=========")
         self.set_state_and_log(ReportState.WORKING)
         print("DL2: =============== Email working")
         try:
@@ -276,6 +277,7 @@ class ReportWorkingState(BaseReportState):
     current_states = [ReportState.WORKING]
 
     def next(self) -> None:
+        print("========In ReportWorkingState=========")
         if self.is_on_working_timeout():
             exception_timeout = ReportScheduleWorkingTimeoutError()
             self.set_state_and_log(
@@ -302,6 +304,7 @@ class ReportSuccessState(BaseReportState):
     current_states = [ReportState.SUCCESS, ReportState.GRACE]
 
     def next(self) -> None:
+        print("========In ReportSuccessState=========")
         self.set_state_and_log(ReportState.WORKING)
         if self._report_schedule.type == ReportScheduleType.ALERT:
             if self.is_in_grace_period():
